@@ -1,27 +1,49 @@
 # LAMMPS input script for colloid diffusion
 # calculates time correlation functions and memory function
 
-
 ##############################
-# input values
+# set input values
 ##############################
 
 # box
 variable	box_size equal 20
 
 # system paramter
-variable	rhos equal 0.4
 variable        T equal 1.5
-variable	rho_plus equal 0.01
-variable	rho_minus equal 0.01
-
-# interactions
-variable	rc equal 1.12246
-variable	rc_coul equal 5.0
+variable	rho_solvent equal 0.4
+variable	rho_salt equal 0.1
 
 # colloid
 variable	R equal 5
 variable	M equal 100
+variable	N_c equal 10
+variable	Q equal 100
+
+# interactions
+variable	rc equal 1.12246
+
+# tuneable parameters
+variable	rc_coul equal 4.0
+variable	skin equal 1.5
+
+
+##############################
+# calculate system variables
+##############################
+
+# reduced densities
+variable	red_rho_solvent equal ${rho_solvent}-2*${rho_salt}
+variable	red_box_size equal (${box_size}^(3.0)-4.0/3.0*PI*${R}^(3.0))^(1.0/3.0)
+
+# counterions
+variable	N_counter equal ${N_c}*${Q}
+
+# interactions
+variable	offset_sc equal $R-1
+variable	cut_sc equal ${offset_sc}+${rc}
+variable	offset_cc equal 2*$R-1
+variable	cut_cc equal ${offset_cc}+${rc}
+
 
 
 ##############################
@@ -34,7 +56,7 @@ dimension	3
 atom_style	charge
 
 # create lattice (to place particles), simulation box
-lattice         sc ${rhos}
+lattice         sc ${red_rho_solvent}
 region          simbox block 0 ${box_size} 0 ${box_size} 0 ${box_size}
 boundary 	p p p
 create_box      4 simbox
@@ -42,46 +64,41 @@ create_box      4 simbox
 # create particles
 # solvent
 create_atoms    1 box
+group		solvent type 1
 
 # positivly charged ions
-lattice         sc ${rho_plus} origin 0.01 0.01 0.01
+lattice         sc ${rho_salt} origin 0.01 0.01 0.01
 create_atoms    2 box
+group		counterions type 2
 
 # negativly charged ions
-lattice         sc ${rho_minus} origin 0.02 0.02 0.02
+lattice         sc ${rho_salt} origin 0.02 0.02 0.02
 create_atoms    3 box
+# add counterions to get neutral system
+create_atoms	3 random ${N_counter} 591654 simbox
+group		coions type 3
 
-# colloids (define new larger lattice for colloids), (only create in region because box_size is not multiple of lattice_spacing
-variable	rhoc equal 1/(2*$R)^3
-variable	scaling equal (${rhos})^(1/3)
-variable	small_size equal ${box_size}-2*$R*${scaling}
-region          smallbox block 0 ${small_size} 0 ${small_size} 0 ${small_size}
-lattice         sc ${rhoc} origin 0.03 0.03 0.03
-#create_atoms    4 region smallbox
+# colloids
+create_atoms    4 random ${N_c} 7435087 simbox
+group		colloid type 4
 
 # initialize particles
 set		type 1 charge 0.0
 set		type 2 charge 1
 set		type 3 charge -1
-set		type 4 charge 0.0
-group		solvent type 1
-group		counterions type 2
-group		coions type 3
-group		colloid type 4
+set		type 4 charge ${Q}
 mass            *3 1.0
-mass            4 100.0
+mass            4 ${M}
 
 # define nighbourlist
-neighbor	1.1 multi
+neighbor	${skin} multi
 neigh_modify	delay 0
 comm_modify     mode multi
 
-# create interaction parameter
-# lj
-variable	offset_sc equal $R-1
-variable	cut_sc equal ${offset_sc}+${rc}
-variable	offset_cc equal 2*$R-1
-variable	cut_cc equal ${offset_cc}+${rc}
+
+##############################
+# relaxation
+##############################
 
 # loop to relax the solvent-colloid interaction
 variable	offset loop 0 10
@@ -95,9 +112,9 @@ pair_coeff      *3 4 1 1 ${offset} ${cut_sc}
 pair_coeff	4 4 1 1 0 ${cut_cc}
 
 # minimze energy for integration
-thermo          100
+thermo          1000
 min_style 	fire
-minimize 	1.0e-6 1.0e-6 10000 10000
+minimize 	1.0e-5 1.0e-5 10000 10000
 reset_timestep  0
 next		offset
 if		"${offset} > ${offset_sc}" then "jump SELF sc_break"
@@ -117,9 +134,9 @@ pair_coeff      *3 4 1 1 ${offset_sc} ${cut_sc}
 pair_coeff	4 4 1 1 ${offset} ${cut_cc}
 
 # minimze energy for integration
-thermo          100
+thermo          1000
 min_style 	fire
-minimize 	1.0e-6 1.0e-6 10000 10000
+minimize 	1.0e-5 1.0e-5 10000 10000
 reset_timestep  0
 next		offset
 if		"${offset} > ${offset_cc}" then "jump SELF cc_break"
@@ -144,6 +161,20 @@ pair_coeff	4 4 lj/off 1 1 ${offset_cc} ${cut_cc}
 pair_coeff      * * coul/long
 kspace_style 	pppm 1.0e-4
 
+
+##############################
+# equilibration output
+##############################
+#dump 		3 all custom 1 dump.myforce type x y z
+#dump		2 all image 1000 image.*.jpg type type &
+#		zoom 1.5 center d 0.5 0.5 0.5
+#dump_modify	2 pad 5 adiam solvent 1.6 adiam colloid 8.0
+
+
+##############################
+# equilibration run
+##############################
+
 # assign random velcities velocities
 velocity        all create $T 97287
 
@@ -151,19 +182,6 @@ velocity        all create $T 97287
 fix             1 all nve
 fix	        2 all langevin $T $T 0.1 498094
 
-##############################
-# prerun output
-##############################
-#dump 		3 all custom 1 dump.myforce type x y z
-#dump		2 all image 1000 image.*.jpg type type &
-#		zoom 1.5 center d 0.5 0.5 0.5
-#dump_modify	2 pad 5 adiam solvent 1.6 adiam colloid 8.0
-
-##############################
-# equilibration run
-##############################
-
-timestep 	0.001
 thermo          100
 run	        1000
 
@@ -189,4 +207,4 @@ fix 4 colloid ave/correlate/peratom 1 1000 2000 v_vx v_vy v_vz v_fx v_fy v_fz fi
 ##############################
 
 thermo          100
-run	        1000000
+run	        1000
