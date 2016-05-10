@@ -23,7 +23,7 @@ variable	Q equal 100
 variable	rc equal 1.12246
 
 # tuneable parameters
-variable	rc_coul equal 4.0
+variable	rc_coul equal 6.0
 variable	skin equal 1.5
 
 
@@ -33,7 +33,7 @@ variable	skin equal 1.5
 
 # reduced densities
 variable	red_rho_solvent equal ${rho_solvent}-2*${rho_salt}
-variable	red_box_size equal (${box_size}^(3.0)-4.0/3.0*PI*${R}^(3.0))^(1.0/3.0)
+variable	red_box_size equal (${box_size}^(3.0)-${N_c}*4.0/3.0*PI*${R}^(3.0))^(1.0/3.0)
 
 # counterions
 variable	N_counter equal ${N_c}*${Q}
@@ -76,6 +76,7 @@ lattice         sc ${rho_salt} origin 0.02 0.02 0.02
 create_atoms    3 box
 # add counterions to get neutral system
 create_atoms	3 random ${N_counter} 591654 simbox
+delete_atoms	group solvent count ${N_counter}
 group		coions type 3
 
 # colloids
@@ -101,7 +102,7 @@ comm_modify     mode multi
 ##############################
 
 # loop to relax the solvent-colloid interaction
-variable	offset loop 0 10
+variable	offset loop 0 100
 
 # increase offset stepwise to relax the system
 label		relax_sc_loop
@@ -113,8 +114,8 @@ pair_coeff	4 4 1 1 0 ${cut_cc}
 
 # minimze energy for integration
 thermo          1000
-min_style 	fire
-minimize 	1.0e-5 1.0e-5 10000 10000
+min_style 	cg
+minimize 	1.0e-6 1.0e-6 10000 10000
 reset_timestep  0
 next		offset
 if		"${offset} > ${offset_sc}" then "jump SELF sc_break"
@@ -123,20 +124,16 @@ label		sc_break
 pair_coeff      *3 4 1 1 ${offset_sc} ${cut_sc}
 
 # loop to relax the colloid-colloid interaction
-variable	offset loop 0 10
+variable	offset loop 0 100
 
 # increase offset stepwise to relax the system
 label		relax_cc_loop
-pair_style      lj/off ${rc}
-pair_modify 	shift yes
-pair_coeff      *3 *3 1 1 0
-pair_coeff      *3 4 1 1 ${offset_sc} ${cut_sc}
 pair_coeff	4 4 1 1 ${offset} ${cut_cc}
 
 # minimze energy for integration
 thermo          1000
-min_style 	fire
-minimize 	1.0e-5 1.0e-5 10000 10000
+min_style 	cg
+minimize 	1.0e-6 1.0e-6 10000 10000
 reset_timestep  0
 next		offset
 if		"${offset} > ${offset_cc}" then "jump SELF cc_break"
@@ -146,19 +143,13 @@ pair_coeff	4 4 1 1 ${offset_cc} ${cut_cc}
 
 # create final interactions
 # lj
-pair_style      hybrid/overlay lj/off ${rc} coul/long ${rc_coul}
+pair_style	hybrid/overlay lj/off ${rc} coul/long ${rc_coul}
 pair_modify 	shift yes
-pair_coeff      *3 *3 lj/off 1 1 0
-variable	offset_sc equal $R-1
-variable	cut_sc equal ${offset_sc}+${offset_sc}
-variable	cut_sc_coul equal ${rc_coul}+${rc}
-pair_coeff      *3 4 lj/off 1 1 ${offset_sc} ${cut_sc}
-variable	offset_cc equal 2*$R-1
-variable	cut_cc equal ${offset_cc}+${rc}
-variable	cut_cc_coul equal ${rc_coul}+${offset_sc}
+pair_coeff	*3 *3 lj/off 1 1 0
+pair_coeff	*3 4 lj/off 1 1 ${offset_sc} ${cut_sc}
 pair_coeff	4 4 lj/off 1 1 ${offset_cc} ${cut_cc}
 # coulomb
-pair_coeff      * * coul/long
+pair_coeff	* * coul/long
 kspace_style 	pppm 1.0e-4
 
 
@@ -193,13 +184,18 @@ reset_timestep  0
 # define on-the-fly calculations
 ##############################
 
-variable vx atom vx
-variable vy atom vy
-variable vz atom vz
-variable fx atom fx
-variable fy atom fy
-variable fz atom fz
-fix 4 colloid ave/correlate/peratom 1 1000 2000 v_vx v_vy v_vz v_fx v_fy v_fz file correlate_charged ave running overwrite
+# radial distribution function
+compute		myRDF all rdf 100 1 4 2 4 3 4
+fix 		3 all ave/time 100 10 1000 c_myRDF file colloid.rdf mode vector ave running overwrite
+
+# self and pair time correlation function of velocities and forces
+variable 	vx atom vx
+variable 	vy atom vy
+variable 	vz atom vz
+variable 	fx atom fx
+variable 	fy atom fy
+variable 	fz atom fz
+fix 		4 colloid ave/correlate/peratom 1 1000 5000 v_vx v_vy v_vz v_fx v_fy v_fz file colloid.cor ave running overwrite
 
 
 ##############################
@@ -207,4 +203,4 @@ fix 4 colloid ave/correlate/peratom 1 1000 2000 v_vx v_vy v_vz v_fx v_fy v_fz fi
 ##############################
 
 thermo          100
-run	        1000
+run	        100000

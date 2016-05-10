@@ -1,24 +1,42 @@
 # LAMMPS input script for colloid diffusion
 # calculates time correlation functions and memory function
 
-
 ##############################
-# input values
+# set input values
 ##############################
 
 # box
-variable	box_size equal 25
+variable	box_size equal 20
 
 # system paramter
-variable	rhos equal 0.04
 variable        T equal 1.5
-
-# interactions
-variable	rc equal 1.12246
+variable	rho_solvent equal 0.4
 
 # colloid
 variable	R equal 5
 variable	M equal 100
+variable	N_c equal 10
+
+# interactions
+variable	rc equal 1.12246
+
+# tuneable parameters
+variable	skin equal 1.5
+
+
+##############################
+# calculate system variables
+##############################
+
+# reduced densities
+variable	red_box_size equal (${box_size}^(3.0)-${N_c}*4.0/3.0*PI*${R}^(3.0))^(1.0/3.0)
+
+
+# interactions
+variable	offset_sc equal $R-1
+variable	cut_sc equal ${offset_sc}+${rc}
+variable	offset_cc equal 2*$R-1
+variable	cut_cc equal ${offset_cc}+${rc}
 
 
 ##############################
@@ -31,7 +49,7 @@ dimension	3
 atom_style	atomic
 
 # create lattice (to place particles), simulation box
-lattice         sc ${rhos}
+lattice         sc ${rho_solvent}
 region          simbox block 0 ${box_size} 0 ${box_size} 0 ${box_size}
 boundary 	p p p
 create_box      2 simbox
@@ -39,48 +57,71 @@ create_box      2 simbox
 # create particles
 # solvent
 create_atoms    1 box
-# colloids (define new larger lattice for colloids), (only create in region because box_size is not multiple of lattice_spacing
-variable	rhoc equal 1/(8*$R)^3
-variable	scaling equal (${rhos})^(1/3)
-variable	small_size equal ${box_size}-2*$R*${scaling}
-region          smallbox block 0 ${small_size} 0 ${small_size} 0 ${small_size}
-lattice         sc ${rhoc}
-create_atoms    2 region smallbox
+group		solvent type 1
 
-# create interactions
-pair_style      lj/off ${rc}
-pair_coeff      1 1 1 1 0
-variable	offset_sc equal $R-1
-variable	cut_sc equal ${offset_sc}+${rc}
-pair_coeff      1 2 1 1 ${offset_sc} ${cut_sc}
-variable	offset_cc equal 2*$R-1
-variable	cut_cc equal ${offset_cc}+${rc}
-pair_coeff	2 2 1 1 ${offset_cc} ${cut_cc}
-pair_modify	shift yes
+# colloids
+create_atoms    2 random ${N_c} 7435087 simbox
+group		colloid type 2
 
 # initialize particles
 mass            1 1.0
-mass            2 100.0
-velocity        all create $T 97287
+mass            2 ${M}
 
 # define nighbourlist
-neighbor	1.1 multi
+neighbor	${skin} multi
 neigh_modify	delay 0
 comm_modify     mode multi
 
-# delete solvent that is caught in colloids
-group		solvent type 1
-group		colloid type 2
-delete_atoms	overlap $R solvent colloid
 
-# define integration
-fix             1 all nve
-fix	        2 all langevin $T $T 0.1 498094
+##############################
+# relaxation
+##############################
+
+# loop to relax the solvent-colloid interaction
+variable	offset loop 0 100
+
+# increase offset stepwise to relax the system
+label		relax_sc_loop
+pair_style      lj/off ${rc}
+pair_modify 	shift yes
+pair_coeff      1 1 1 1 0
+pair_coeff      1 2 1 1 ${offset} ${cut_sc}
+pair_coeff	2 2 1 1 0 ${cut_cc}
+
+# minimze energy for integration
+thermo          1000
+min_style 	cg
+minimize 	1.0e-6 1.0e-6 10000 10000
+reset_timestep  0
+next		offset
+if		"${offset} > ${offset_sc}" then "jump SELF sc_break"
+jump		SELF relax_sc_loop
+label		sc_break
+pair_coeff      1 2 1 1 ${offset_sc} ${cut_sc}
+
+# loop to relax the colloid-colloid interaction
+variable	offset loop 0 100
+
+# increase offset stepwise to relax the system
+label		relax_cc_loop
+pair_coeff	2 2 1 1 ${offset} ${cut_cc}
+
+# minimze energy for integration
+thermo          1000
+min_style 	cg
+minimize 	1.0e-6 1.0e-6 10000 10000
+reset_timestep  0
+next		offset
+if		"${offset} > ${offset_cc}" then "jump SELF cc_break"
+jump		SELF relax_cc_loop
+label		cc_break
+pair_coeff	2 2 1 1 ${offset_cc} ${cut_cc}
 
 
 ##############################
-# prerun output
+# equilibration output
 ##############################
+#dump 		3 all custom 1 dump.myforce type x y z
 #dump		2 all image 1000 image.*.jpg type type &
 #		zoom 1.5 center d 0.5 0.5 0.5
 #dump_modify	2 pad 5 adiam solvent 1.6 adiam colloid 8.0
@@ -90,8 +131,14 @@ fix	        2 all langevin $T $T 0.1 498094
 # equilibration run
 ##############################
 
-timestep 	0.001
-thermo          1000
+# assign random velcities velocities
+velocity        all create $T 97287
+
+# define integration
+fix             1 all nve
+fix	        2 all langevin $T $T 0.1 498094
+
+thermo          100
 run	        1000
 
 unfix		2
@@ -102,19 +149,23 @@ reset_timestep  0
 # define on-the-fly calculations
 ##############################
 
-variable vx atom vx
-variable vy atom vy
-variable vz atom vz
-variable fx atom fx
-variable fy atom fy
-variable fz atom fz
-#fix 4 colloid ave/correlate/peratom 1 1000 2000 v_vx v_vy v_vz v_fx v_fy v_fz file correlate_solo ave running overwrite
-#dump 3 colloid custom 1 dump.myforce vx
+# radial distribution function
+compute		myRDF all rdf 100 1 2
+fix 		3 all ave/time 100 10 1000 c_myRDF file colloid_uncharged.rdf mode vector ave running overwrite
+
+# self and pair time correlation function of velocities and forces
+variable 	vx atom vx
+variable 	vy atom vy
+variable 	vz atom vz
+variable 	fx atom fx
+variable 	fy atom fy
+variable 	fz atom fz
+fix 		4 colloid ave/correlate/peratom 1 1000 5000 v_vx v_vy v_vz v_fx v_fy v_fz file colloid_uncharged.cor ave running overwrite
+
 
 ##############################
 # production run
 ##############################
 
-timestep 	0.001
-thermo          1000
-run	        1000000
+thermo          100
+run	        100000
